@@ -1,0 +1,54 @@
+{
+  "training_config": {
+    "dataset_location": "${DATASET_LOCATION}",
+    "n_training_samples": 100,
+    "model_source_type": "python",
+    "model_load_kwargs": {"model_name": "simple_test_model"},
+    "loop_name": "pytorch_classification_loop",
+    "loop_kwargs": {},
+    "train_loader_kwargs": {"batch_size": 32},
+    "test_loader_kwargs": {"batch_size": 32},
+    "optimizer": "Adam",
+    "loss_function": "CrossEntropyLoss",
+    "epochs": 1,
+    "device": "cpu",
+    "register_device": "cpu",
+    "run_name": "example-usage",
+    "model_register_name": "example_simple_model",
+    "dataset_implementation": "lakefs_source",
+    "dataset_description": {
+      "sample_column": ["X", "bytes"],
+      "sample_shape": [8],
+      "target_column": ["y", "int"],
+      "target_shape": [1],
+      "order_column": ["write_timestamp", "datetime"],
+      "target_interp": "classification"
+    }
+  },
+  "validation_config": {
+    "model_source": "mlflow",
+    "model_load_kwargs": {},
+    "device": "cpu",
+    "dataset_implementation": "lakefs_source",
+    "dataset_description": {
+      "sample_column": ["X", "bytes"],
+      "sample_shape": [8],
+      "target_column": ["y", "int"],
+      "target_shape": [1],
+      "order_column": ["write_timestamp", "datetime"],
+      "target_interp": "classification"
+    },
+    "validations": [{
+      "validation_type": "standalone",
+      "rules": [{
+        "rule_name": "minimum-accuracy",
+        "data_source": "${DATASET_LOCATION}",
+        "n_samples": 10,
+        "metric": "accuracy_score",
+        "max_value": 1.0,
+        "min_value": 0.0
+      }]
+    }]
+  },
+  "deploy_criteria": "none"
+}

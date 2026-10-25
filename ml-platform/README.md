@@ -1,7 +1,7 @@
 # ML Platform demonstration setup
 
 This is an proof of concept MLOps system. Podman Compose runs PostgreSQL,
-SeaweedFS/S3, MLflow, LakeFS, the orchestrator, and inference services.
+SeaweedFS/S3, MLflow, LakeFS, the orchestrator, inference service, and client.
 
 ## Setup
 
