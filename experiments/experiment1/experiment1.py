@@ -1,0 +1,792 @@
+import os
+import sys
+import requests
+import json
+
+
+"""
+Experiment steps:
+    1. generate data with a data configuration
+
+    2. start inference client
+    3. set the desired drift function and data source via set_drift_func and set_data_source
+    4. start inference server with defined detection algorithms and settings
+    5. start orchestrator and run manual_start for each subset of data
+
+    6. The stopping condition should be defined in the inference server such that the notifies will let the experiment runner know when to stop sending samples via the inference client
+
+    7. Once all combinations are tested the trace logs should be parsed one big data source for analysis. This should be aggregated with the drift function to get gound truth sample indexing
+    
+
+
+"""
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+import re
+from time import sleep
+import time
+import dotenv
+from pydantic import BaseModel
+import requests
+import inspect
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Event, Thread
+import json
+import shutil
+"""
+Experiment steps:
+    0. start mlops-stack
+    1. generate data with a data configuration
+
+    2. start inference client
+    3. set the desired drift function and data source via set_drift_func and set_data_source
+    4. start inference server with defined detection algorithms and settings
+    5. start orchestrator and run manual_start for each subset of data
+
+    6. The stopping condition should be defined in the inference server such that the notifies will let the experiment runner know when to stop sending samples via the inference client
+
+    7. Once all combinations are tested, the trace logs should be parsed one big data source for analysis. This should be aggregated with the drift function to get gound truth of the drift
+    
+
+
+- Preferrably the state of the experiment should be saved for the ability to resume if something happens.
+    - The subsets should be correctly still in LakeFS
+    - The model training should be deterministic
+    - Return to the previous:
+        - detection method
+        - drift regime
+        - subset
+    - start from step 2
+
+    - copying the trace logs after a succesul subset run to a target directory could be useful for this
+"""
+
+
+# variables
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+dotenv.load_dotenv(REPOSITORY_ROOT / "ml-platform/.env")
+
+class Vars:
+    mlflow_url: str     = os.environ["MLFLOW_TRACKING_URI"].replace("mlflow", "localhost")
+    lakefs_url: str     = os.environ["SERVER_ENDPOINT_URL"].replace("lakefs", "localhost")
+    inf_server_url: str = "http://localhost:8012"
+    inf_client_url: str = "http://localhost:8013"
+    orchestrator_url: str = "http://localhost:8014"
+
+    temp_dir: Path = REPOSITORY_ROOT / "experiments/experiment1/temp/"
+
+    data_config_file: Path = REPOSITORY_ROOT / "experiments/experiment1/data_config.json"
+
+    data_generation: Path = REPOSITORY_ROOT / "ml-platform/src/ml_platform/data_generation/generate_datasets.py"
+
+    inference_client_settings: Path = "experiments/experiment1/inference_client_settings.json"
+    inference_client_dir: Path = REPOSITORY_ROOT / "ml-platform/src/ml_platform/inference_client/"
+    inference_client_dockerfile: Path = PROJECT_ROOT / "src/Dockerfile-inference-client.Dockerfile"
+
+    inference_server_settings: Path = "experiments/experiment1/inference_server_settings.json"
+    inference_server_dir: Path = PROJECT_ROOT / "src/inference_server2/"
+    inference_server_dockerfile: Path = PROJECT_ROOT / "src/Dockerfile-inference-server2.Dockerfile"
+
+    manual_start: Path = REPOSITORY_ROOT / "experiments/experiment1/manual_start.json"
+
+
+# step classes
+class StepResult(BaseModel):
+    success: bool
+    results: dict = {}
+
+
+class StepSuccess(StepResult):
+    success: bool = True
+    results: dict = {}
+
+
+class StepFail(StepResult):
+    success: bool = False
+    results: dict = {}
+
+    @classmethod
+    def here(cls, **results):
+        frame = sys._getframe(1)
+        return cls( results={ "__file__": frame.f_code.co_filename, "__line__": frame.f_lineno, **results, } )
+
+
+class StepFailedError(Exception):
+    def __init__(self, step: StepFail):
+        file = step.results.get("__file__", "<unknown>")
+        line = step.results.get("__line__", "?")
+        extra = { k: v for k, v in (step.results or {}).items() if not k.startswith("__") }
+        msg = f"Step failed at {file}:{line}"
+        if extra: msg += f"\nResults: {extra}"
+        super().__init__(msg)
+        self.step = step
+
+
+stop_event = Event()
+
+def create_server(check_fn, port=8016):
+    stop_event.clear()
+
+    class NotifyHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+
+            try:
+                data = json.loads(body)
+                print("Received:", data)
+
+                if check_fn(data):
+                    stop_event.set()
+
+            except Exception:
+                print("Received non-JSON payload")
+
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, format, *args):
+            pass
+
+    return HTTPServer(("0.0.0.0", port), NotifyHandler)
+
+
+# helpers
+def check_service(url, code):
+    try:
+        response = requests.get(url)
+    except Exception:
+        return False
+    return response.status_code == code
+
+
+def get_event(event_id: str) -> dict:
+    response = requests.get(f"{Vars.orchestrator_url}/events/{event_id}", timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+def wait_for_terminal_event(event_id: str, timeout_seconds: float = 3600) -> dict:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        event = get_event(event_id)
+        if event.get("status") in {"complete", "failed"}:
+            return event
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Timed out waiting for event {event_id}")
+        sleep(5)
+
+
+def run_cmd_live(cmd, printout=True, wait=True):
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    if not wait:
+        return proc
+
+    buffer = []
+    for line in proc.stdout:
+        if printout:
+            print(line, end="")
+        buffer.append(line)
+
+    returncode = proc.wait()
+    return returncode, buffer
+
+
+"""
+Below are defined the steps described at the beginning of the file
+"""
+
+def step0(prev_result: StepResult=StepSuccess()) -> StepResult:
+    """
+    1. check if mlops-stack is active
+    2. ping /health on all services
+    """
+    os.makedirs(Vars.temp_dir, exist_ok=True)
+
+    urls = [
+        Vars.lakefs_url + "/health",
+        Vars.inf_server_url + "/state",
+        Vars.inf_client_url + "/health",
+        Vars.mlflow_url + "/health",
+        Vars.orchestrator_url + "/health",
+    ]
+
+    for url in urls:
+        ok = check_service(url, 200)
+        if not ok:
+            print(f"FAIL: {url}: {ok}")
+            return StepFail()
+        else:
+            print(f"OK  : {url}: {ok}")
+
+    return StepSuccess()
+
+
+def step1(prev_result: StepResult) -> StepResult:
+    if not prev_result.success:
+        raise StepFailedError(prev_result)
+
+
+    if not Vars.data_config_file.exists():
+        return StepFail()
+    
+    cmd = [ sys.executable, Vars.data_generation, "--config", Vars.data_config_file, ]
+    returncode, buffer = run_cmd_live(cmd)
+
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+
+    i, m = 1, None
+    pattern = (
+            r"\[INFO\] "
+            r"\[\d{2}:\d{2}:\d{2}\] "
+            r"\[(?P<stage>[^\]]+)\]: "
+            r"(?P=stage) stage done, artifact in (?P<artifact>\S+)"
+        )
+    while m is None and i < 10:
+        final_output = buffer[-i]
+        print(final_output)
+        m = re.search(pattern, final_output) # NOTE: reliant on printed output
+        i += 1
+
+    if m is None:
+        return StepFail()
+
+    with open(Vars.data_config_file, "r") as f:
+        cfg = json.load(f)
+
+    final_stage = cfg["data_configuration"]["phases"][-1]
+    stage = m.group("stage")
+
+    if stage != final_stage: # make sure final stage mathces the configured final stage
+        return StepFail()
+
+    data_source = m.group("artifact").removeprefix("lakefs://")
+
+    return StepSuccess( results={ "data_source": data_source, } )
+
+
+def step2(prev_result: StepResult):
+    """
+    Build and start inference client container, or use available instance
+    """
+    if not prev_result.success:
+        raise StepFailedError(prev_result)
+
+    if check_service(f"{Vars.inf_client_url}/health", 200):
+        return StepSuccess(results={**prev_result.results})
+
+    with podman.PodmanClient() as client:
+
+        # copy settings over
+        insert_line = 17
+        text = f"COPY {Vars.inference_client_settings} ./inference_client/settings.json"
+        cmd = [ "sed", "-i", f"{insert_line}i\\{text}", Vars.inference_client_dockerfile, ]
+        returncode, buffer = run_cmd_live(cmd)
+
+        if returncode != 0:
+            return StepFail( results={"reason": "Copying settings over failed"} )
+
+        cmd = ["sed", f"{insert_line}q;d", f"{Vars.inference_client_dockerfile}"]
+        returncode, buffer = run_cmd_live(cmd)
+
+        # build image
+        cmd = [ "bash", str(Vars.inference_client_dir / "build.sh"), ]
+        returncode, buffer = run_cmd_live(cmd)
+
+        cmd = [ "sed", "-i", f"{insert_line}d", Vars.inference_client_dockerfile, ]
+        sed_return, _ = run_cmd_live(cmd)
+
+        if sed_return != 0:
+            return StepFail(results={"reason": "deleting generated line in dockerfile failed"})
+
+        if returncode != 0:
+            return StepFail( results={"reason": "building inference client failed"} )
+
+        ic = client.containers.list(all=True, name="inference-client")
+
+        if len(ic) < 1:
+            return StepFail(results={"reason": "Inference-client image not available"})
+
+
+    # start inference client        
+    cmd = ["bash", str(Vars.inference_client_dir / "start_pod.sh")]
+    proc = run_cmd_live(cmd, wait=False, printout=False)
+
+    max_tries = 5
+    tries = 0
+    while not check_service(f"{Vars.inf_client_url}/health", 200):
+        sleep(10)
+        if tries >= max_tries:
+            return StepFail(results={"reason": "inference server not available"})
+        tries += 1
+    
+    return StepSuccess(results={**prev_result.results})
+
+
+def step3(prev_result: StepResult) -> StepResult:
+    """
+    build and start inference server container, or use available instance
+    """
+    if not prev_result.success:
+        raise StepFailedError(prev_result)
+
+    if check_service(f"{Vars.inf_server_url}/state", 200):
+        return StepSuccess(results={**prev_result.results})
+
+    with podman.PodmanClient() as client:
+
+        # copy settings over
+        insert_line = 18
+        text = f"COPY {Vars.inference_server_settings} ./inference_server2/settings.json"
+        cmd = [ "sed", "-i", f"{insert_line}i\\{text}", Vars.inference_server_dockerfile, ]
+        returncode, buffer = run_cmd_live(cmd)
+
+        if returncode != 0:
+            return StepFail( results={"reason": "Copying settings over failed"} )
+
+        # build image
+        cmd = [ "bash", str(Vars.inference_server_dir / "build.sh"), ]
+        returncode, buffer = run_cmd_live(cmd)
+
+        cmd = [ "sed", "-i", f"{insert_line}d", Vars.inference_server_dockerfile, ]
+        sed_return, _ = run_cmd_live(cmd)
+
+        if sed_return != 0:
+            return StepFail(results={"reason": "deleting generated line in dockerfile failed"})
+
+        if returncode != 0:
+            return StepFail( results={"reason": "building inference sever failed"} )
+
+        ic = client.containers.list(all=True, name="inference-server2")
+
+        if len(ic) < 1:
+            return StepFail(results={"reason": "inference-server image not available"})
+
+
+    # start inference server        
+    cmd = ["bash", str(Vars.inference_server_dir / "start_pod.sh")]
+    run_cmd_live(cmd, wait=False, printout=False)
+
+    max_tries = 10
+    tries = 0
+    while not check_service(f"{Vars.inf_server_url}/state", 200):
+        print("checking inference server state")
+        if tries >= max_tries:
+            return StepFail(results={"reason": "inference server not available"})
+        sleep(10)
+        
+        tries += 1
+
+    return StepSuccess(results={**prev_result.results})
+
+    
+def step4(prev_result: StepResult):
+    """
+    Build and start orchestrator
+    """
+    if not prev_result.success:
+        raise StepFailedError(prev_result)
+    
+    if check_service(f"{Vars.orchestrator_url}/health", 200):
+        print("Orchestrator OK")
+        return StepSuccess(results={**prev_result.results})
+
+
+    return StepSuccess(results={**prev_result.results})
+
+
+def step5(prev_result: StepResult) -> StepResult:
+    """
+    Run experiment
+    """
+    if not prev_result.success:
+        raise StepFailedError(prev_result)
+
+    if not os.path.exists(Vars.manual_start):
+        return StepFail(results={"reason": f"manual_start.json does not exits in {Vars.manual_start}"})
+    
+    with open(Vars.manual_start, "r") as f:
+        manual_cfg = json.load(f)
+
+    # set detection methods for inference server
+    if not check_service(f"{Vars.inf_server_url}/state", 200):
+        return StepFail(results={"reason": "inference server not available"})
+
+    # r = requests.post(url=f"{Vars.inf_server_url}/remove_dd", json={"method": "all"})
+    # rem = r.json()["remaining"]
+    # if len(rem) > 0:
+    #     return StepFail(results={"reason": f"failed to remove all detectors {rem}"})
+
+    total_regimes =  len(EXPERIMENT_STATE["waiting"]["regime"])
+    total_subsets = len(EXPERIMENT_STATE["waiting"]["subset"])
+    total_iterations = total_subsets * total_regimes
+    current_iteration = 1
+
+    for i_subset, subset in enumerate(EXPERIMENT_STATE["waiting"]["subset"]):
+        # manual start to train the model and update to inference server
+
+        off_data = prev_result.results["data_source"] + str(subset) + "/offline/"            
+        manual_cfg["training_config"]["dataset_location"] = off_data # replace training data
+
+        for v in manual_cfg["validation_config"]["validations"]: # replace validation data
+            for r in v["rules"]:
+                r["data_source"] = off_data 
+        
+        
+        r = requests.post(url=f"{Vars.orchestrator_url}/events/manual-start", json=manual_cfg)
+        
+        if r.status_code != 202:
+            print(r.content)
+            return StepFail(results={"reason": "manual-start failed"})
+        
+        event_id = r.json()["event_id"]
+        print(f"Manual start, event_id={event_id}")
+
+        try:
+            event = wait_for_terminal_event(event_id)
+        except (requests.RequestException, TimeoutError) as error:
+            return StepFail(results={"reason": f"Training event unavailable: {error}"})
+        if event["status"] == "failed":
+            return StepFail(results={"reason": "Training the model failed", "error": event.get("error")})
+
+        cur_uuid = event.get("result", {}).get("uuid")
+        if cur_uuid is None:
+            return StepFail(results={"reason": "Training completed without a deployment UUID"})
+
+        available_models = requests.get(
+            url=f"{Vars.inf_server_url}/available_models", timeout=30
+        ).json()["available"]
+        if cur_uuid not in available_models:
+            return StepFail(results={"reason": "Deployed model is unavailable"})
+
+        print(f"Model deployed ({available_models[cur_uuid]})")
+
+
+        data = {"uuid": cur_uuid, "configs": methods_settings}
+        r = requests.post(url=f"{Vars.inf_server_url}/add_plugins", json=data)
+        print(r.json())
+
+        for i, s in enumerate(r.json()["success"]):
+            if not s:
+                return StepFail(results={"reason": f"failed to add detector {methods_settings[i]}"})
+        
+
+        for i_regime, drift_regime in enumerate(EXPERIMENT_STATE["waiting"]["regime"]):
+            print(f"\nROUND {current_iteration}/{total_iterations}: subset {i_subset + 1}/{total_subsets}, regime {i_regime + 1}/{total_regimes}\n")
+
+            # set online data and drift function for inference client
+            on_data = prev_result.results["data_source"] + str(subset) + "/online/"
+
+            r = requests.post(url=f"{Vars.inf_client_url}/set_drift_func", json=drifts[drift_regime])
+            
+            if not r.json()["found"]:
+                return StepFail(results={"reason": f"failed to set drift function {drifts[drift_regime]}"})
+
+            r = requests.post(
+                url=f"{Vars.inf_client_url}/set_data_source",
+                json={
+                    "location": on_data,
+                    "dataset_description": manual_cfg["training_config"]["dataset_description"],
+                },
+                timeout=30,
+            )
+            if not r.json()["found"]:
+                return StepFail(results={"reason": f"failed to set data source {on_data}"})
+
+
+            detections = {
+                "conformal": False,
+                "energydistance": False,
+                "c2st": False,
+                "mmd": False,
+            }
+            def stopping_condition(data):
+                if isinstance(data, str):
+                    data = json.loads(data)
+                if data["name"] in detections.keys():
+                    if not detections[data["name"]] and data["is_drift"]:
+                        detections[data["name"]] = True 
+                    
+                return all(detections.values()) # wait until all detectors have fired
+
+            stop_event.clear()
+            print(f"stopping condition reset({stop_event.is_set()}):", detections)
+
+            server = create_server(stopping_condition)
+
+            Thread(target=server.serve_forever, daemon=True).start()
+
+            print("Waiting for notification...")
+
+            while not stop_event.is_set():
+                
+                response = requests.post(
+                    f"{Vars.inf_client_url}/send_n_samples",
+                    json={"n": 10, "uuid": cur_uuid, "labels": None},
+                    timeout=30,
+                )
+                if response.status_code != 200:
+                    print(response.content)
+                    print("send_n_samples returned a non-success response")
+                    break
+
+                r = requests.get(f"{Vars.inf_client_url}/is_out_of_samples")
+                if r.json()["out_of_samples"]:
+                    csi = r.json()["current_sample_index"]
+                    ts = r.json()["total_samples"]
+
+                    r = requests.post(
+                        url=f"{Vars.inf_server_url}/sync_plugins",
+                        json={"uuid": cur_uuid},
+                        timeout=30,
+                    )
+
+                    stop_event.set()
+
+                sleep(0.1)
+
+            print("Stopping condition achieved.")
+            server.shutdown()
+            del server
+            
+            # collect trace log and reset drift detection
+            r = requests.post(url=f"{Vars.inf_server_url}/reset_plugin_log", json={"uuid": cur_uuid})
+            clog = r.json()["log_file"]
+
+            r = requests.post(url=f"{Vars.inf_server_url}/reset_plugins", json={"uuid": cur_uuid})
+
+            EXPERIMENT_STATE["completed"]["associated_log_files"].append(clog)
+            EXPERIMENT_STATE["completed"]["regime"].append(drift_regime)
+            EXPERIMENT_STATE["completed"]["subset"].append(subset)
+
+            # data = {"create_new_log": True}
+            # r = requests.post(url=f"{Vars.inf_server_url}/reset_dd", json=data)
+
+            current_iteration += 1
+
+        r = requests.post(f"{Vars.inf_server_url}/remove_deployment", json={"uuid": cur_uuid})
+        if r.json()["remaining"] != {}:
+            return StepFail(results={"reason": "failed to remove deployment"})
+
+    return StepSuccess(results={
+        **prev_result.results,
+        "associated_log_files": EXPERIMENT_STATE["completed"]["associated_log_files"],
+        "regimes": EXPERIMENT_STATE["completed"]["regime"],
+        "subsets": EXPERIMENT_STATE["completed"]["subset"]
+
+        })
+
+
+def step6(prev_result: StepResult):
+    if not prev_result.success:
+        raise StepFailedError(prev_result)
+
+    results = prev_result.results
+
+    filenames = [Path(f)  for f in results.get("associated_log_files", [])]
+    regs = results.get("regimes")
+    subs = results.get("subsets")
+
+    if len(regs) != len(subs) or len(subs) != len(filenames):raise
+    # return StepFail(results={
+    #     "reason": f"Length mismatch: regs={len(regs)}, subs={len(subs)}, filenames={len(filenames)}"
+    #     })
+
+    now = time.strftime("%Y%m%d_%H%M%S")
+    data_directory = REPOSITORY_ROOT / "notebooks" / "data" / f"{now}"
+    os.makedirs(data_directory, exist_ok=True)
+
+    for src, reg, sbs in zip(filenames, regs, subs):
+        dst = data_directory / f"{reg}_{sbs}_{src.name}"
+        print("COPY", src, dst)
+
+        shutil.copy(src, dst)
+
+
+
+
+if __name__ == "__main__":
+
+        
+
+
+    
+    drifts = {
+        "gradual": {
+                "drift_func_name": "CPNDriftFunc",
+                "drift_func_kwargs": {
+                        "augmentation_func": ["draw_scratch", "blur"],
+                        "augmentation_kwargs": [{
+                            "n_scratches_range": [3,5],
+                            "length_range": [0.3, 0.6],
+                            "width_range": [0.01, 0.02],
+                            "angle_range": [0, 6.2832],
+                            "circularity_range": [0.0, 1.0],
+                            "degree": 4
+                        },
+                        {}
+                    ],
+                    "parameter_names": ["curvature_range", "sigma"],
+                    "param_values": [[0.0, 0.6], [0.7, 1.2]],
+                    "param_cps": [[0.3, 0.7], [0.3, 0.7]],
+                    "class_ratio": [0.5, 1.0],
+                    "replace_all_labels": [True, False],
+                }
+            },
+        "sudden": {
+            "drift_func_name": "CPNDriftFunc",
+            "drift_func_kwargs": {
+                    "augmentation_func": ["draw_scratch", "blur"],
+                    "augmentation_kwargs": [{
+                        "n_scratches_range": [3,5],
+                        "length_range": [0.3, 0.6],
+                        "width_range": [0.01, 0.02],
+                        "angle_range": [0, 6.2832],
+                        "circularity_range": [0.0, 1.0],
+                        "degree": 4
+                    },
+                    {}
+                ],
+                "parameter_names": ["curvature_range", "sigma"],
+                "param_values": [[0.0, 0.6], [0.7, 1.2]],
+                "param_cps": [[0.3, 0.31], [0.3, 0.31]],
+                "class_ratio": [0.5, 1.0],
+                "replace_all_labels": [True, False],
+            }
+        }
+    }
+
+    notifier_url = os.environ.get(
+        "EXPERIMENT_NOTIFICATION_URL", "http://host.containers.internal:8016"
+    )
+    methods_settings = [
+        {
+            "plugin_type": "drift",
+            "name": "mmd",
+            "parameters": {
+                "quantile_probability":0.95,
+                "bootstrap": True
+            },
+            "trace_fields": ["mmd2u", "perc"],
+            "notifiers": [notifier_url],
+        },
+        {
+            "plugin_type": "drift",
+            "name": "conformal",
+            "parameters": {
+                "quantile_probability":0.95,
+            },
+            "trace_fields": ["threshold", "stat"],
+            "notifiers": [notifier_url],
+        },
+        {
+            "plugin_type": "drift",
+            "name": "c2st",
+            "parameters": {
+                "quantile_probability":0.95,
+                "bootstrap": True
+            },
+            "trace_fields": ["roc_aucV", "rand_roc_aucT"],
+            "notifiers": [notifier_url],
+        },
+        {
+            "plugin_type": "drift",
+            "name": "energydistance",
+            "parameters": {
+                "quantile_probability":0.95,
+                "bootstrap": True
+            },
+            "trace_fields": ["res", "perc"],
+            "notifiers": [notifier_url],
+        },
+        {
+            "plugin_type": "eval",
+            "name": "metrics",
+            "parameters": {
+            },
+            "trace_fields": [],
+            "notifiers": [],
+        }
+    ]
+
+    EXPERIMENT_STATE = {
+        "completed": {
+            "subset": [],
+            "regime": [],
+            "associated_log_files": [],
+            "combination": []
+            },
+
+        "waiting": {
+            "subset": [],
+            "regime": [],
+        }  
+    }
+
+    regimes = ["gradual", "sudden"]
+    subsets = list(range(60))
+
+    # return from previous state
+    os.makedirs(Vars.temp_dir, exist_ok=True)
+    state_file = Vars.temp_dir / "state.json"
+    if os.path.exists(state_file):
+        with open(state_file, "r") as f:
+            EXPERIMENT_STATE = json.load(f)
+        print(f"Loaded experiment state: {EXPERIMENT_STATE}")
+    else:
+        files = os.listdir(Vars.temp_dir)
+        for f in files:
+            full_path = Vars.temp_dir / f
+            print(f"removing {full_path}")
+            os.remove(full_path)
+
+        EXPERIMENT_STATE["waiting"] = {
+            "subset": subsets,
+            "regime": regimes,
+        }
+
+    
+
+    # RUN STEPS
+    steps = [step0, step1, step5, step6]
+
+    previous = StepSuccess()
+
+    for i, step in enumerate(steps):
+        print(f"\nSTEP {i} PROCESSING\n")
+
+        try:
+            stepresult = step(previous)
+            print(f"\nSTEP {i} DONE, result: {stepresult}\n")
+            previous = stepresult
+
+        except KeyboardInterrupt:
+            print(f"step{i} interrupted")
+            print("experiment state:", EXPERIMENT_STATE)
+
+            with open(state_file, "w") as f:
+                json.dump(EXPERIMENT_STATE, f)
+            break
+
+        except Exception as e:
+            print(f"step{i} raised an exception: {e}")
+            print("experiment state:", EXPERIMENT_STATE)
+
+            with open(state_file, "w") as f:
+                json.dump(EXPERIMENT_STATE, f)
+            break
+
+            

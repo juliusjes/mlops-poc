@@ -1,0 +1,19 @@
+[project]
+name = "builtin"
+description = "Description of the builtin options"
+dynamic = ["version"]
+dependencies = [
+    "torch",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = [
+    "build*",
+    "dist*",
+    "*.egg-info*",
+]

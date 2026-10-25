@@ -1,0 +1,9 @@
+{
+    "send_path": "predict_emb",
+    "data_source": null,
+    "sample_column": "waferMap",
+    "target_column": "failure_label",
+    "drift_func_name":  null,
+    "drift_func_kwargs": {
+    }
+}

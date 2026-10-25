@@ -1,0 +1,68 @@
+{
+  "training_config": {
+                "dataset_location": "masters-thesis/expa541006be1af9983/expdata/0/offline/",
+                "n_training_samples" : -1,
+                "model_source_type": "python",
+                "model_load_kwargs": {
+                    "python_file": "/home/mfijulje/masters-thesis/masters-thesis-main/code/src/ml/models.py",
+                    "class_name": "SimpleResNet"
+                    },
+                "trainer_name": "BasicTrainer",
+                "trainer_config": {
+                    "train_loader_kwargs": {"batch_size": 64},
+                    "test_loader_kwargs": {"batch_size": 64},
+                    "optimizer": "Adam",
+                    "loss_function": "CrossEntropyLoss",
+                    "epochs": 20,
+                    "device": "cuda"
+                },
+                "run_name": "Training_run",
+                "model_register_name": "simple_resnet_pilot",
+
+                "dataset_implementation": "LakeFSDataset",
+                "dataset_description": {
+                    "sample_column": ["waferMap", "bytes"],
+                    "sample_shape": [1, 128, 128],
+                    "target_column": ["failure_label", "int"],
+                    "target_shape": [1],
+                    "order_column": ["write_timestamp", "datetime"],
+                    "target_interp": "classification"
+                }
+                
+            },
+  "validation_config": {
+        "validations": [
+                {
+                    "validation_type": "standalone",
+                    "rules": [
+                        {
+                        "rule_name": "accuracy_n_100",
+                        "data_source": "masters-thesis/expa541006be1af9983/expdata/0/offline/",
+                        "n_samples" : 100,
+                        "sampling": "exp_weight_latest",
+                        "metric": "accuracy",
+                        "max_value": 1.0,
+                        "min_value": 0.2
+                        },
+                        {
+                        "data_source": "masters-thesis/expa541006be1af9983/expdata/0/offline/",
+                        "n_samples" : 100,
+                        "metric": "recall",
+                        "max_value": 1.0,
+                        "min_value": 0.2
+                        }
+                    ]
+                }
+            ],
+        "model_register_name": "simple_resnet_pilot",
+        "dataset_implementation": "LakeFSDataset",
+        "dataset_description": {
+            "sample_column": ["waferMap", "bytes"],
+            "target_column": ["failure_label", "int"],
+            "order_column": ["write_timestamp", "datetime"],
+            "target_interp": "classification",
+            "sample_shape": [1, 128, 128],
+            "target_shape": [1]
+        }
+        }
+}

@@ -1,0 +1,68 @@
+{
+  "training_config": {
+    "dataset_location": "placeholder",
+    "n_training_samples": -1,
+    "model_source_type": "python",
+    "model_load_kwargs": {"model_name": "simple_resnet"},
+    "loop_name": "pytorch_classification_loop",
+    "loop_kwargs": {},
+    "train_loader_kwargs": {"batch_size": 64},
+    "test_loader_kwargs": {"batch_size": 64},
+    "optimizer": "Adam",
+    "loss_function": "CrossEntropyLoss",
+    "epochs": 30,
+    "device": "cpu",
+    "register_device": "cpu",
+    "run_name": "Training_run",
+    "model_register_name": "simple_resnet_exp1",
+    "dataset_implementation": "lakefs_source",
+    "dataset_description": {
+      "sample_column": ["waferMap", "bytes"],
+      "sample_shape": [1, 128, 128],
+      "target_column": ["failure_label", "int"],
+      "target_shape": [1],
+      "order_column": ["write_timestamp", "datetime"],
+      "target_interp": "classification"
+    }
+  },
+  "validation_config": {
+    "model_source": "mlflow",
+    "model_load_kwargs": {"model_uri": "models:/simple_resnet_exp1/placeholder"},
+    "device": "cpu",
+    "dataset_implementation": "lakefs_source",
+    "dataset_description": {
+      "sample_column": ["waferMap", "bytes"],
+      "sample_shape": [1, 128, 128],
+      "target_column": ["failure_label", "int"],
+      "target_shape": [1],
+      "order_column": ["write_timestamp", "datetime"],
+      "target_interp": "classification"
+    },
+    "validations": [
+      {
+        "validation_type": "standalone",
+        "rules": [
+          {
+            "rule_name": "accuracy_n_100",
+            "data_source": "placeholder",
+            "n_samples": 100,
+            "sampling": "exp_weight_latest",
+            "metric": "accuracy_score",
+            "max_value": 1.0,
+            "min_value": 0.2
+          },
+          {
+            "rule_name": "recall_n_100",
+            "data_source": "placeholder",
+            "n_samples": 100,
+            "sampling": "exp_weight_latest",
+            "metric": "recall_score",
+            "max_value": 1.0,
+            "min_value": 0.2
+          }
+        ]
+      }
+    ]
+  },
+  "deploy_criteria": "none"
+}

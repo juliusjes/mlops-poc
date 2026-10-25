@@ -1,0 +1,9 @@
+{
+    "send_path": "predict",
+    "data_source": null,
+    "sample_column": "X",
+    "target_column": "y",
+    "drift_func_name":  null,
+    "drift_func_kwargs": {
+    }
+}

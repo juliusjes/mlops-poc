@@ -1,0 +1,15 @@
+# Python cache / bytecode
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+
+# Packaging
+**/*.egg-info/
+**/dist/
+**/build/
+
+**/.pytest_cache/
+
+# Local service credentials are injected at runtime by Compose and must never
+# be included in a container image layer.
+.env

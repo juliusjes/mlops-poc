@@ -1,0 +1,43 @@
+{
+    "data_configuration": {
+        "phases": ["raw", "exp"],
+        "repository": "test-data1/",
+        
+        "phase_configs": {
+            "raw": {
+                "data_branch": "main/",
+                "pipeline": ["data_processing.generate_simple_data", "data_processing.df_to_lakeFS_parquet"],
+                "initial_arg": 1001,
+                "pipeline_kwargs": {
+                    "data_processing.generate_simple_data": {},
+                    "data_processing.df_to_lakeFS_parquet": {
+                        "location": "s3://test-data1/main/rawdata/",
+                        "storage_options": {},
+                        "ser_col": "X"
+                    }
+                },
+                "final_arg": "lakefs://test-data1/main/rawdata/"
+            },
+
+            "exp": {
+                "data_branch": "exp%/",
+                "pipeline": ["data_processing.lakeFS_parquet_to_df", "data_processing.simple_experiment_datasets_to_lakeFS"],
+                "initial_arg": "test-data1/main/rawdata/",
+                "pipeline_kwargs": {
+                    "data_processing.lakeFS_parquet_to_df": {
+                        "storage_options": {},
+                        "deser_col": ["X"]
+                    },
+                    "data_processing.simple_experiment_datasets_to_lakeFS": {
+                        "N": 10,
+                        "location": "s3://test-data1/exp%/expdata/",
+                        "storage_options": {}
+                    }
+                },
+                "final_arg": "lakefs://test-data1/exp%/expdata/"
+            }
+                
+        }
+    }
+
+}

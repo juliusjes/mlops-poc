@@ -1,0 +1,243 @@
+services:
+
+  postgres:
+    image: docker.io/library/postgres@sha256:3518071376d0b6156b02e1db2747a78511b5b9dc3763cc79c506ebe2dc2ee71c
+    #container_name: postgresdb
+
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: mydatabase
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres:/docker-entrypoint-initdb.d:Z
+
+    ports:
+      - "5432:5432"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d mydatabase"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+
+  
+  seaweed:
+    image: docker.io/chrislusf/seaweedfs@sha256:aba492e2a4e4c90bff795745e8e660affa1f09e7650f5981bd7bccd1a06cd931
+
+    #command: server -dir=/data -s3
+
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      S3_BUCKET: my-bucket
+
+    ports:
+      - "8333:8333"
+      - "23646:23646"
+      - "8888:8888"
+      - "9333:9333"
+      - "8444:8444"
+
+    volumes:
+      - seaweed_data:/data
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:8333/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  seaweed-bootstrap:
+    image: docker.io/amazon/aws-cli@sha256:d703ef127f2bb24a674584c9caa91a9a4577212f136b0f4a7bd60c4426dbbfa9
+    env_file:
+      - .env
+    depends_on:
+      seaweed:
+        condition: service_healthy
+    volumes:
+      # - ./seaweed/01_bootstrap.sh:/bootstrap.sh:ro
+      - ./seaweed/01_bootstrap.sh:/bootstrap.sh:ro,z # fedora only
+
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+    restart: "no"
+
+
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+
+    depends_on:
+      seaweed:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL}
+
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri
+      - postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow_db
+      - --default-artifact-root
+      - s3://mlflow-bucket/
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --allowed-hosts
+      - "*"
+
+    ports:
+      - "5000:5000"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  lakefs:
+    image: docker.io/treeverse/lakefs@sha256:45f80069533687216e8aec37aee57e727840e9d8034e2329826523155783e92e
+    #container_name: lakefs
+    depends_on:
+      seaweed:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+    environment:
+      LAKEFS_DATABASE_TYPE: "postgres"
+      LAKEFS_DATABASE_POSTGRES_CONNECTION_STRING: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/lakefs_db"
+      LAKEFS_AUTH_ENCRYPT_SECRET_KEY: ${LAKEFS_AUTH_ENCRYPT_SECRET_KEY}
+      LAKEFS_BLOCKSTORE_TYPE: "s3"
+      LAKEFS_BLOCKSTORE_S3_FORCE_PATH_STYLE: "true"
+      LAKEFS_BLOCKSTORE_S3_ENDPOINT: ${MLFLOW_S3_ENDPOINT_URL}
+      LAKEFS_BLOCKSTORE_S3_DISCOVER_BUCKET_REGION: "false"
+      LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+
+    ports:
+      - "8000:8000"
+
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8000/healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # evidently:
+  #   image: docker.io/evidently/evidently-service:latest
+  #   container_name: evidently
+
+  #   environment:
+  #     DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/evidently_db
+
+  #   volumes:
+  #     - evidently-workspace:/app/workspace
+
+  #   ports:
+  #     - "8000:8002"
+
+  orchestrator:
+    security_opt:
+      - label=disable # fedora only
+
+    build:
+      context: .
+      dockerfile: ./src/ml_platform/orchestrator/Dockerfile
+
+    env_file:
+      - .env
+
+    depends_on:
+      # mlflow:
+      #   condition: service_started
+      # lakefs:
+      #   condition: service_healthy
+      # postgres:
+      #   condition: service_healthy
+      inference-server:
+        condition: service_healthy
+
+    ports:
+      - "8014:8014"
+        
+    volumes:
+      - ${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock
+    environment:
+      CONTAINER_HOST: unix:///run/podman/podman.sock
+      WORKER_GPU_ENABLED: ${WORKER_GPU_ENABLED:-false}
+      WORKER_NETWORK: ${WORKER_NETWORK:-ml-platform_default}
+
+
+  inference-server:
+    build:
+      context: .
+      dockerfile: ./src/ml_platform/inference_server/Dockerfile
+
+    #container_name: inference-server
+    env_file:
+      - .env
+
+    volumes:
+      # - ${ML_PLATFORM_DATA_DIR}/outputs/logs:/outputs/logs:Z
+      - ${ML_PLATFORM_DATA_DIR}/outputs/logs:/outputs/logs:z # fedora only
+
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      lakefs:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+    ports:
+     - "8012:8012"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:8012/state"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  inference-client:
+    build: 
+      context: .
+      dockerfile: ./src/ml_platform/inference_client/Dockerfile
+
+    #container_name: inference-client
+
+    env_file:
+      - .env
+
+    volumes:
+      #- ${ML_PLATFORM_DATA_DIR}/outputs/logs:/outputs/logs:Z
+      - ${ML_PLATFORM_DATA_DIR}/outputs/logs:/outputs/logs:z # fedora only
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      lakefs:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+    ports:
+      - "8013:8013"
+
+networks:
+  default:
+    name: ${WORKER_NETWORK:-ml-platform_default}
+
+volumes:
+  postgres-data:  
+  seaweed_data:
+  evidently-workspace:

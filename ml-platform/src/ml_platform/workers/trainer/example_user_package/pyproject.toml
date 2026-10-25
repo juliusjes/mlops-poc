@@ -1,0 +1,16 @@
+[project]
+name = "user_package"
+description = "Description of the user defined package"
+dynamic = ["version"]
+dependencies = [
+    "torch",
+    "pandas",
+    "numpy"
+]
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = [
+    "build*",
+    "dist*",
+    "*.egg-info*",
+]

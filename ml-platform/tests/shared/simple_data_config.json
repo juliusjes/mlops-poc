@@ -1,0 +1,43 @@
+{
+    "data_configuration": {
+        "phases": ["raw", "exp"],
+        "repository": "pytest1",
+        
+        "phase_configs": {
+            "raw": {
+                "data_branch": "main/",
+                "pipeline": [
+                    "data_processing.generate_simple_data",
+                    "data_processing.df_to_lakeFS_parquet"
+                ],
+                "initial_arg": 1001,
+                "pipeline_kwargs": {
+                    "data_processing.generate_simple_data": {},
+                    "data_processing.df_to_lakeFS_parquet": {
+                        "location": "pytest1/main/rawdata/",
+                        "ser_col": ["X"]
+                    }
+                },
+                "final_arg": "pytest1/main/rawdata/"
+            },
+
+            "exp": {
+                "data_branch": "exp%/",
+                "pipeline": ["data_processing.lakeFS_parquet_to_df", "data_processing.simple_experiment_datasets_to_lakeFS"],
+                "initial_arg": "pytest1/main/rawdata/",
+                "pipeline_kwargs": {
+                    "data_processing.lakeFS_parquet_to_df": {
+                        "deser_col": ["X"]
+                    },
+                    "data_processing.simple_experiment_datasets_to_lakeFS": {
+                        "N": 10,
+                        "location": "pytest1/exp%/expdata/"
+                    }
+                },
+                "final_arg": "pytest1/exp%/expdata/"
+            }
+                
+        }
+    }
+
+}

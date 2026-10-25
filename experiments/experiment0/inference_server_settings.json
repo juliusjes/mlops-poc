@@ -1,0 +1,15 @@
+{
+    "detection_config": {
+        "detectors": [
+
+        ],
+        "reference_window_update_frequency": 10000,
+        "drift_window_size": 80,
+        "min_window_overlap": 0,
+        "project_name": "experiment0",
+        "detection_notify": [
+            "http://localhost:8016/"
+        ],
+        "detection_to_reports": false
+    }
+}

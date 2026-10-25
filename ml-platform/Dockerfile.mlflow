@@ -1,0 +1,5 @@
+FROM ghcr.io/mlflow/mlflow@sha256:55397c19d68cba2b2f18b8b80a10cfb967c3135e9cb1094f6350866f13ccf447
+
+RUN pip install --no-cache-dir \
+    "psycopg[binary]" \
+    boto3

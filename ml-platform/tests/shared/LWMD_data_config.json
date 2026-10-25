@@ -1,0 +1,96 @@
+{
+    "data_configuration": {
+
+        "phases": ["raw", "filter", "experiment"],
+        
+        "repository": "pytest",
+
+        "phase_configs": {
+            "raw": {
+                "data_branch": "raw/",
+                "pipeline": [
+                    "data_processing.ensure_data_file",
+                    "data_processing.LSWMD_to_df",
+                    "data_processing.LSWMD_prepare",
+                    "data_processing.df_to_lakeFS_parquet"
+                ],
+                "initial_arg": "/home/mfijulje/masters-thesis/masters-thesis-main/code/data/LSWMD.pkl",
+                "pipeline_kwargs": {
+                    "data_processing.ensure_data_file": {
+                        
+                    },
+                    "data_processing.LSWMD_to_df": {},
+                    "data_processing.LSWMD_prepare": {},
+                    "data_processing.df_to_lakeFS_parquet": {
+                        "location": "pytest/raw/rawdata/",
+                        "ser_col": ["waferMap"]
+                    }
+                },
+                "final_arg": "pytest/main/rawdata/"
+            },
+
+            "filter": {
+                "data_branch":"filtered%/",
+                "pipeline": [
+                    "data_processing.lakeFS_parquet_to_df",
+                    "image_processing.filter_by_grid_size",
+                    "image_processing.LSWMD_pad",
+                    "image_processing.LSWMD_scale",
+                    "data_processing.df_to_lakeFS_parquet"
+                ],
+                "initial_arg": "pytest/main/rawdata/",
+                "pipeline_kwargs": {
+                    "data_processing.lakeFS_parquet_to_df": {"deser_col": ["waferMap"]},
+                    "image_processing.filter_by_grid_size": { "grid_col": "waferMap", "h_max": 120, "w_max": 120, "h_min": 75, "w_min": 75 },
+                    "image_processing.LSWMD_pad": { "h":1, "w":1 },
+                    "image_processing.LSWMD_scale": {"target_size": [128, 128]},
+                    "data_processing.df_to_lakeFS_parquet": {
+                        "location": "pytest/filtered%/filterdata/",
+                        "ser_col": ["waferMap"]
+                    }
+                },
+                "final_arg": "pytest/filtered%/filterdata/"
+            },
+
+            "experiment": {
+                "data_branch": "exp%/",
+                "pipeline": [
+                    "data_processing.lakeFS_parquet_to_df",
+                    "data_processing.LSWMD_experiment_datasets_to_lakeFS",
+                    "data_processing.metadata_to_lakeFS"
+                ],
+                "initial_arg": "pytest/filtered%/filterdata/",
+                "metadata_select": ["pipeline", "pipeline_kwargs.LSWMD_experiment_datasets_to_lakeFS"],
+                "pipeline_kwargs": {
+                    "data_processing.lakeFS_parquet_to_df": {"deser_col": ["waferMap"]},
+                    "data_processing.LSWMD_experiment_datasets_to_lakeFS": {
+                        "N" : 2,
+                        "seeds": [0, 1],
+                        "l1": 500,
+                        "l2": 500,
+                        "class_ratio": 0.5,
+                        "location": "pytest/exp%/expdata/",
+                        "scratch_kwargs": {
+                            "n_scratches_range": [3,5],
+                            "length_range": [0.3, 0.6],
+                            "width_range": [0.01, 0.02],
+                            "curvature_range": 0.0,
+                            "angle_range": [0, 6.2832],
+                            "circularity_range": [0.0, 1.0],
+                            "degree": 4
+                        },
+                        "mapping_kwargs": {
+                            "target_column": "failure_label",
+                            "mapping": {"Scratch": 1},
+                            "default_value": 0
+                        }
+                    },
+                    "data_processing.metadata_to_lakeFS": {
+                        "metadata": {}
+                        }
+                },
+                "final_arg": "pytest/exp%/expdata/"
+            }
+        }
+    }
+}
