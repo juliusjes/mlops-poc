@@ -31,24 +31,22 @@ systemctl --user enable --now podman.socket
 test -S "$XDG_RUNTIME_DIR/podman/podman.sock" && echo "Podman socket ready"
 ```
 
-After logging in to LakeFS for the first time, download its credentials file
-and update the .env file accordingly.
-
 ## Start the stack
 
-Run Compose with the `ml-platform` project name. Dynamic workers use its
-default network, `ml-platform_default`:
+Run Compose. Dynamic workers use its default network, `ml-platform_default`:
 
 ```bash
 cd ml-platform
-podman compose -p ml-platform up -d
+podman compose up -d
+```
+
+Check that all container have started. Note that some container images can take over 10 minutes to build.
+```bash
 podman ps -a
 ```
 
 The normal worker mode is CPU-only. Set `WORKER_GPU_ENABLED=true` in `.env`
 only when rootless Podman can expose `nvidia.com/gpu=all`. This requires compatible Nvidia drivers.
-
-Note that some container images can take over 10 minutes to build.
 
 Check that the services are ready:
 
@@ -66,6 +64,10 @@ and
 podman ps
 ```
 
+After logging in to LakeFS at [http://localhost:8000] for the first time, download its credentials file
+and update the .env file accordingly.
+
+
 If a service fails to start, inspect its logs before recreating containers:
 
 ```bash
@@ -74,6 +76,11 @@ podman logs ml-platform_orchestrator_1
 
 Changing the application Dockerfiles or requirement manifests requires rebuilding the affected Compose images with `podman compose -p ml-platform build`. Trainer and
 validator images are built on demand by the orchestrator.
+
+## Potential issues
+
+- The containers map their default ports to localhost (see [docker-compose.yml](./docker-compose.yml)). If these clash with services on your local system the container startup will fail. For example if you already have a Postgres instance running locally on port 5432, the Postgres container will fail to start.
+
 
 ## Validation and reproducibility
 

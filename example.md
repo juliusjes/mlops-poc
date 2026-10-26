@@ -1,6 +1,6 @@
 # Example usage
 
-This walkthrough uses the local demonstration stack described in
+This example uses the local demonstration stack described in
 [`ml-platform/README.md`](ml-platform/README.md). It creates LakeFS data,
 trains a small CPU model, deploys it, and sends predictions. It writes to the
 LakeFS repository configured in `example/test_data_config.json`, PostgreSQL,
@@ -9,13 +9,15 @@ and MLflow; use it only with the local demo services.
 ## 1. Generate simple data
 
 From `ml-platform/`, generate the data described by the existing test-data
-configuration kept alongside this walkthrough:
+configuration kept alongside this example:
 
 ```bash
 ML_PLATFORM_DATA_DIR="$(cd .. && pwd)" \
   pyenv exec python -m ml_platform.data_generation.generate_datasets \
   --config ../example/test_data_config.json
 ```
+This script generates simple 8D vector data, creates a lakeFS repository, and performs preprocessing ([details](ml-platform/src/ml_platform/data_generation/README.md)).
+
 
 The final `exp stage done, artifact in ...` line is the generated experiment
 location. The training dataset is its first offline split; append
@@ -32,7 +34,7 @@ You can view this data LakeFS from the repository at http://localhost:8000.
 
 Submit the training request in
 [`example/training_request.json`](example/training_request.json).
-`deploy_criteria: "none"` is intentional for this minimal walkthrough: it
+`deploy_criteria: "none"` is intentional for this minimal example: it
 deploys after training and validation regardless of the validation score. Use
 `"validated"` when deployment must depend on a passing validation rule.
 
@@ -54,6 +56,9 @@ export EVENT_ID="<event-id>"
 curl -sS "http://localhost:8014/events/${EVENT_ID}"
 curl -sS "http://localhost:8014/events/${EVENT_ID}/history"
 ```
+
+Note that during first time use the orchestrator API is unresponsive when building the trainer and validator images. This can take up to 10 minutes
+
 
 The final event result contains `model_uri`, validation output, `deployed`,
 and, on successful deployment, `uuid`. The MLflow UI is available at
@@ -133,3 +138,61 @@ response.raise_for_status()
 print(response.json())
 PY
 ```
+
+
+# These steps are not tested
+
+
+## 5. Add a performance metric
+
+Add simple performance metric:
+
+```bash
+curl -sS -X POST http://localhost:8012/add_plugin \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<EOF
+{
+  "uuid": "${DEPLOYMENT_ID}",
+  "method_settings": {
+    "plugin_type": "eval",
+    "name": "metrics",
+    "parameters": {},
+    "trace_fields": [],
+    "notifiers": []
+  }
+}
+EOF
+```
+
+The performance is calculated every 10 samples. And the performance logs should be in outputs/logs.
+
+## 6. Add drift detector
+
+Add simple embedding drift detector in the same way
+
+```bash
+curl -sS -X POST http://localhost:8012/add_plugin \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<EOF
+{
+  "uuid": "${DEPLOYMENT_ID}",
+  "method_settings": {
+    {
+      "plugin_type": "drift",
+      "name": "mmd",
+      "parameters": {
+          "quantile_probability":0.95,
+          "bootstrap": True
+      },
+      "trace_fields": ["mmd2u", "perc"],
+      "notifiers": ["http://localhost:8016/some-endpoint"]
+    }
+  }
+}
+EOF
+```
+
+The drift detection is performed every 10 samples and the window sizes are 100 by default. 
+
+The notifier tries to send a POST request to the notifier endpoint containing the name of the detector and statistic value when drift is detected.
+If the request fails, a warning is shown in the inference server's logs.
