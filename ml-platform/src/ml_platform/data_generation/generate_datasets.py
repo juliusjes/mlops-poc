@@ -136,7 +136,7 @@ def initialize_data(dcfg: DataConfiguration):
 
         cond1 = not lakefs_service.is_path_lakefs(target)
 
-        condition = (cond1)
+        condition = (cond1 and False) # TODO: fix the i_path_lakefs function so that the generation does not run for no reason 
 
         if not condition: # TODO: add forced duplication
             arg = pcfg.initial_arg if arg is None else arg
